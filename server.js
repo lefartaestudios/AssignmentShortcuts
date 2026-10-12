@@ -18,6 +18,9 @@
 //   GET /proxy?mode=browse&url=<address>
 //       Same, but HTML also gets a script that sends the page's own fetch/XHR calls back
 //       through the proxy. Used by the "Show in frame" button.
+//   GET /proxy?mode=module&url=<address>
+//       A JavaScript file with its import statements pointed back through the proxy, so
+//       ES modules (used by most modern sites) load. index.html asks for this itself.
 //   GET /health        returns "ok"
 //   GET /              serves index.html (and /favicon.ico) from this folder
 const http = require("http");
@@ -33,7 +36,7 @@ const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 120;
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 
 const MAX_REDIRECTS = 6;
-const TIMEOUT_MS = 25000;
+const TIMEOUT_MS = 40000;
 const MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_UA = "Mozilla/5.0 (compatible; AssignmentShortcuts/2.0)";
 
@@ -96,6 +99,17 @@ async function fetchFollow(url, init) {
   throw new Error("Too many redirects");
 }
 
+// ---- Module mode: ES modules and the location references inside them ----
+const LOC_RE = /(?:(?<![\w$.])|\b(?:window|document|top|self|parent)\.)location\.(href|origin|protocol|host|hostname|port|pathname|search|hash|assign|replace|reload|toString)\b/g;
+function rewriteModule(src, baseUrl, proxyOrigin) {
+  const mod = (u) => proxyOrigin + "/proxy?mode=module&url=" + encodeURIComponent(u);
+  src = src.replace(/(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"'\n]+)\2/g, (m, pre, q, spec) => {
+    if (!/^(\.{0,2}\/|https?:\/\/)/.test(spec)) return m;      // bare names are left alone
+    try { const u = new URL(spec, baseUrl); return /^https?:$/.test(u.protocol) ? pre + q + mod(u.href) + q : m; } catch (e) { return m; }
+  });
+  return src.replace(LOC_RE, "window.__nbLoc.$1").replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
+}
+
 // ---- Browse mode: sends the page's fetch/XHR back through the proxy ----
 function shim(proxyOrigin, baseUrl) {
   const code = `(function(){var P=${JSON.stringify(proxyOrigin)},B=${JSON.stringify(baseUrl)};
@@ -130,7 +144,8 @@ async function handleProxy(req, res, reqUrl) {
   const target = reqUrl.searchParams.get("url");
   if (!target) return fail(res, 400, "Missing ?url=");
   try { new URL(target); } catch (e) { return fail(res, 400, "That is not a valid address"); }
-  const browse = reqUrl.searchParams.get("mode") === "browse";
+  const mode = reqUrl.searchParams.get("mode");
+  const browse = mode === "browse";
 
   try {
     const headers = { "user-agent": DEFAULT_UA };
@@ -158,10 +173,16 @@ async function handleProxy(req, res, reqUrl) {
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length > MAX_BYTES) return fail(res, 413, "That file is too large for the proxy");
 
+    const proto = req.headers["x-forwarded-proto"] || "http";
+    const origin = PUBLIC_URL || `${proto}://${req.headers.host}`;
+
+    if (mode === "module") {
+      res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      return res.end(rewriteModule(buf.toString("utf8"), finalUrl, origin));
+    }
+
     if (browse && type.includes("text/html")) {
       let html = buf.toString("utf8");
-      const proto = req.headers["x-forwarded-proto"] || "http";
-      const origin = PUBLIC_URL || `${proto}://${req.headers.host}`;
       const tag = shim(origin, finalUrl);
       html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + tag) : tag + html;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
