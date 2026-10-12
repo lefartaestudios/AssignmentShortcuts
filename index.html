@@ -526,7 +526,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
           return;
         }
         var js = await fetchAsset(ctx, u, "text");
-        if (js == null) return;
+        if (js == null) { if (ctx.link) sc.setAttribute("src", proxModule(u)); return; }
         sc.removeAttribute("src");
         sc.removeAttribute("integrity");
         sc.removeAttribute("crossorigin");
@@ -634,7 +634,17 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       'get search(){return R.search},set search(v){L.href=part("search",v)},' +
       'get hash(){return L.hash},set hash(v){L.hash=v},' +
       'assign:function(v){L.href=to(v)},replace:function(v){L.replace(to(v))},reload:function(){L.reload()},' +
-      'toString:function(){return R.href}}}catch(e){}})();<\/script>';
+      'toString:function(){return R.href}};' +
+      // Catch redirects the moment they happen, before the site's other scripts can leave the tab.
+      'var nv=window.navigation;if(nv&&nv.addEventListener){nv.addEventListener("navigate",function(e){try{' +
+      'if(e.defaultPrevented||!e.cancelable||e.downloadRequest||!window.__nbGo)return;' +
+      'var d=e.destination&&e.destination.url;' +
+      'if(e.navigationType==="reload"){e.preventDefault();window.__nbGo("",{reload:true});return}' +
+      'if(e.hashChange||!d)return;' +
+      'if(/^about:blank\\?/i.test(d)){var q=d.slice(d.indexOf("?")),h=q.indexOf("#"),u=new URL(R.href);u.search=h<0?q:q.slice(0,h);u.hash=h<0?"":q.slice(h);e.preventDefault();window.__nbGo(u.href,{auto:!e.userInitiated});return}' +
+      'if(/^https?:/i.test(d)){e.preventDefault();window.__nbGo(d,{auto:!e.userInitiated,replace:e.navigationType==="replace"})}' +
+      '}catch(x){}})}' +
+      '}catch(e){}})();<\/script>';
   }
 
   var LOC_RE = /(?:(?<![\w$.])|\b(?:window|document|top|self|parent)\.)location\.(href|origin|protocol|host|hostname|port|pathname|search|hash|assign|replace|reload|toString)\b/g;
@@ -672,11 +682,18 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       'if(i&&i.url)return f.call(this,new Request(w(i.url),i),o)}catch(e){}return f.apply(this,arguments)};' +
       'var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=w(String(u));try{this.withCredentials=false}catch(e){}return x.apply(this,arguments)};' +
       'if(navigator.sendBeacon){var b=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=function(u,d){return b(w(String(u)),d)}}' +
+      'function ws(u){try{var a=new URL(u,B);if(!/^https?:$/.test(a.protocol)||a.href.indexOf(P+"/")===0)return u;return P+"/proxy?mode=module&url="+encodeURIComponent(a.href)}catch(e){return u}}' +
+      'if(typeof HTMLScriptElement!=="undefined"){var sd=Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype,"src");' +
+      'if(sd&&sd.set)Object.defineProperty(HTMLScriptElement.prototype,"src",{get:sd.get,set:function(v){sd.set.call(this,ws(String(v)))},configurable:true});' +
+      'var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){if(this instanceof HTMLScriptElement&&String(n).toLowerCase()==="src")v=ws(String(v));return sa.call(this,n,v)}}' +
       '}catch(e){}})();';
   }
 
   function rewriteLoc(js) {
-    return js.replace(LOC_RE, "window.__nbLoc.$1").replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
+    return js.replace(LOC_RE, "window.__nbLoc.$1")
+      .replace(/\b(?:window|document|self|top|parent)\.location\s*=(?!=)/g, "window.__nbLoc.href=")
+      .replace(/\b(?:window|document|self|top|parent)\.location\b/g, "window.__nbLoc")
+      .replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
   }
 
   // Same rewrite for the inline scripts of a raw HTML string (normal mode).
@@ -1015,7 +1032,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       };
       // Script redirects (location.href = ..., location.replace(...), reloads).
       ctx.onNav = function (e) {
-        if (!e.cancelable || e.downloadRequest) return;
+        if (e.defaultPrevented || !e.cancelable || e.downloadRequest) return;
         if (e.navigationType === "reload") { e.preventDefault(); ctx.step(0); return; }
         var dest = e.destination && e.destination.url;
         // location.search = "?x" on the blank page becomes "about:blank?x": treat it as
@@ -1036,6 +1053,9 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
         ctx.go(dest, { auto: !e.userInitiated, replace: e.navigationType === "replace" });
       };
     }
+    try {
+      w.__nbGo = function (u, nav) { if (nav && nav.reload) ctx.step(0); else ctx.go(u, nav); };
+    } catch (e) {}
     d.addEventListener("click", ctx.onClick);
     d.addEventListener("auxclick", ctx.onClick);
     d.addEventListener("submit", ctx.onSubmit);
@@ -1147,6 +1167,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     var done = function (html, finalUrl, refresh) {
       if (token !== ctx.token || w.closed) return;
       commit(finalUrl);
+      installHooks(ctx);            // before the page's scripts run, so early redirects are caught
       writeHtml(w, html);
       ctx.hasPage = true;
       installHooks(ctx);
