@@ -14,6 +14,9 @@
 //   GET /proxy?mode=browse&url=<address>
 //       HTML comes back with its links rewritten and its fetch/XHR calls patched, so the
 //       page keeps working inside a frame ("Show in frame").
+//   GET /proxy?mode=module&url=<address>
+//       A JavaScript file with its import statements pointed back through the proxy, so
+//       ES modules (used by most modern sites) load. index.html asks for this itself.
 //   GET /https://example.com/page
 //       Older address form; same as browse mode.
 
@@ -37,6 +40,18 @@ export function blockedHost(host) {
   }
   if (h.includes(":")) return h === "::1" || h === "::" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80") || h.startsWith("::ffff:");
   return false;
+}
+
+// ES modules: point their imports back through the proxy, and make location references
+// report the site's real address (index.html provides window.__nbLoc).
+const LOC_RE = /(?:(?<![\w$.])|\b(?:window|document|top|self|parent)\.)location\.(href|origin|protocol|host|hostname|port|pathname|search|hash|assign|replace|reload|toString)\b/g;
+export function rewriteModule(src, baseUrl, proxyOrigin) {
+  const mod = (u) => proxyOrigin + "/proxy?mode=module&url=" + encodeURIComponent(u);
+  src = src.replace(/(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"'\n]+)\2/g, (m, pre, q, spec) => {
+    if (!/^(\.{0,2}\/|https?:\/\/)/.test(spec)) return m;      // bare names are left alone
+    try { const u = new URL(spec, baseUrl); return /^https?:$/.test(u.protocol) ? pre + q + mod(u.href) + q : m; } catch (e) { return m; }
+  });
+  return src.replace(LOC_RE, "window.__nbLoc.$1").replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
 }
 
 function corsHeaders(request, env) {
@@ -87,12 +102,14 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
     // Work out which site we are proxying and how.
-    let target, browse = false;
+    let target, browse = false, moduleMode = false;
     if (reqUrl.pathname === "/proxy") {
       const t = reqUrl.searchParams.get("url");
       if (!t) return fail(cors, 400, "Missing ?url=");
       try { target = new URL(t); } catch (e) { return fail(cors, 400, "That is not a valid address"); }
-      browse = reqUrl.searchParams.get("mode") === "browse";
+      const mode = reqUrl.searchParams.get("mode");
+      browse = mode === "browse";
+      moduleMode = mode === "module";
     } else {
       browse = true;   // older address form: /https://example.com/page
       const direct = reqUrl.pathname.slice(1) + reqUrl.search;
@@ -128,6 +145,10 @@ export default {
       out.set("Cache-Control", "no-store");
 
       const type = out.get("Content-Type") || "";
+      if (moduleMode) {
+        out.set("Content-Type", "text/javascript; charset=utf-8");
+        return new Response(rewriteModule(await upstream.text(), finalUrl, self), { status: upstream.status, headers: out });
+      }
       if (!browse || !type.includes("text/html")) {
         return new Response(request.method === "HEAD" ? null : upstream.body, { status: upstream.status, headers: out });
       }
