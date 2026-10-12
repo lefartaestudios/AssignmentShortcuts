@@ -57,14 +57,13 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   var HOME_ICON = /^https?:$/.test(location.protocol)
     ? new URL("favicon.ico", location.href).href
     : "https://raw.githubusercontent.com/lefartaestudios/AssignmentShortcuts/refs/heads/main/favicon.ico";
-  // Optional: the address of your own proxy (the Cloudflare Worker in worker.js or the
-  // Node server in server.js), for example "https://my-proxy.workers.dev". Leave it empty
-  // to request sites directly from the browser.
-  var PROXY_URL = "";
-
-  // A page served over https is not allowed to request plain http:// addresses
-  // (mixed content). Served over http, from a file, or on localhost, it can.
-  var CAN_HTTP = PROXY_URL ? true : location.protocol !== "https:";
+  // Optional: your own proxy (the Cloudflare Worker in worker.js or the Node server in
+  // server.js). Its address is typed into the launcher page and saved; with it empty,
+  // sites are requested directly from the browser. applyProxy() fills in the values below.
+  var PROXY_URL = "", PROXY_BASE = "", DIRECT = null;
+  var CAN_HTTP = false;     // a page served over https cannot request plain http:// directly
+  var MAX_FILES = 200, MAX_BYTES = 30 * 1024 * 1024, MAX_FILE = 6 * 1024 * 1024;
+  var PAGE_TIMEOUT = 20000, ASSET_TIMEOUT = 12000;
   function secureUrl(u) { return CAN_HTTP ? u : u.replace(/^http:/i, "https:"); }
   var ICON_TAG = '<link rel="icon" href="' + HOME_ICON + '">';
 
@@ -237,13 +236,25 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
 
   // ---- Connection ----------------------------------------------------
   // No proxies: the page is requested straight from the site by the browser.
-  var PROXY_BASE = PROXY_URL.replace(/\/+$/, "");
-  var DIRECT = PROXY_URL
-    ? { name: "Your proxy", frame: true, binary: true,
+  function applyProxy(v) {
+    PROXY_URL = String(v || "").trim();
+    if (PROXY_URL && !/^https?:\/\//i.test(PROXY_URL)) PROXY_URL = "https://" + PROXY_URL;
+    PROXY_BASE = PROXY_URL.replace(/\/+$/, "");
+    CAN_HTTP = PROXY_BASE ? true : location.protocol !== "https:";
+    if (PROXY_BASE) {
+      // Through a proxy, big sites are fine: more and larger files, and more patience.
+      MAX_FILES = 600; MAX_BYTES = 120 * 1024 * 1024; MAX_FILE = 25 * 1024 * 1024;
+      PAGE_TIMEOUT = 45000; ASSET_TIMEOUT = 25000;
+      DIRECT = { name: "Your proxy", frame: true, binary: true,
         build: function (u) { return PROXY_BASE + "/proxy?url=" + encodeURIComponent(u); },
         finalOf: function (res) { return res.headers.get("x-final-url"); },
-        frameUrl: function (u) { return PROXY_BASE + "/proxy?mode=browse&url=" + encodeURIComponent(u); } }
-    : { name: "Direct connection", frame: true, binary: true, build: function (u) { return u; } };
+        frameUrl: function (u) { return PROXY_BASE + "/proxy?mode=browse&url=" + encodeURIComponent(u); } };
+    } else {
+      MAX_FILES = 200; MAX_BYTES = 30 * 1024 * 1024; MAX_FILE = 6 * 1024 * 1024;
+      PAGE_TIMEOUT = 20000; ASSET_TIMEOUT = 12000;
+      DIRECT = { name: "Direct connection", frame: true, binary: true, build: function (u) { return u; } };
+    }
+  }
   function ident(t) { return t; }
 
   function store(key, fallback) {
@@ -252,9 +263,9 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   function save(key, val) {
     try { window.localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
   }
+  applyProxy(store("notblank.proxy", ""));
 
   // ---- Loading engine ---------------------------------------------------
-  var MAX_FILES = 200, MAX_BYTES = 30 * 1024 * 1024, MAX_FILE = 6 * 1024 * 1024;
   var ctxs = new WeakMap(); // one state object per opened tab
 
   async function timedFetch(target, opts, ms) {
@@ -337,7 +348,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
           if (cancelled()) return null;
           status(round === 1 && !v ? "Loading " + url + " ..." : "Attempt " + round + ": trying " + tries[v] + " ...");
           try {
-            var res = await timedFetch(p.build(tries[v]), Object.assign({}, p.opts || {}, round > 1 ? { cache: "no-store" } : {}), force ? 10000 : 20000);
+            var res = await timedFetch(p.build(tries[v]), Object.assign({}, p.opts || {}, round > 1 ? { cache: "no-store" } : {}), force ? 10000 : PAGE_TIMEOUT);
             var html = (p.parse || ident)(await res.text());
             var ct = res.headers.get("content-type") || "";
             if (force) {
@@ -398,7 +409,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       for (var i = 0; i < ctx.assetProxies.length; i++) {
         var p = ctx.assetProxies[i];
         try {
-          var res = await timedFetch(p.build(secureUrl(url)), p.opts, 12000);
+          var res = await timedFetch(p.build(secureUrl(url)), p.opts, ASSET_TIMEOUT);
           if (!res.ok) throw new Error("HTTP " + res.status);
           var ct = res.headers.get("content-type") || "";
           if (/text\/html/i.test(ct)) throw new Error("returned a web page, not a file");
@@ -453,7 +464,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       try { urls[m[2]] = new URL(m[2].trim(), cssUrl).href; } catch (e) {}
     }
     var keys = Object.keys(urls), got = {};
-    await pool(keys.map(function (k) { return async function () { got[k] = (await fetchAsset(ctx, urls[k], "data")) || urls[k]; }; }), 6);
+    await pool(keys.map(function (k) { return async function () { got[k] = ctx.link ? proxUrl(urls[k]) : ((await fetchAsset(ctx, urls[k], "data")) || urls[k]); }; }), 6);
     return css.replace(re, function (all, q, u) {
       return got[u] ? 'url("' + got[u] + '")' : all;
     });
@@ -470,7 +481,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     var abs = function (u) { try { return new URL(u, base).href; } catch (e) { return u; } };
 
     var ctx = {
-      cache: new Map(), count: 0, bytes: 0, finalOf: {}, pathBudget: 40,
+      cache: new Map(), count: 0, bytes: 0, finalOf: {}, pathBudget: PROXY_BASE ? 0 : 40, link: !!PROXY_BASE,
       assetProxies: list.filter(function (p) { return p.binary; })
     };
 
@@ -506,7 +517,14 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
         var u = abs(sc.getAttribute("src"));
         var type = (sc.getAttribute("type") || "").toLowerCase();
         sc.setAttribute("src", u);
-        if (type === "module" || sc.hasAttribute("nomodule")) return;
+        if (type === "module" || sc.hasAttribute("nomodule")) {
+          if (ctx.link && type === "module") {        // the proxy rewrites the module's imports
+            sc.setAttribute("src", proxModule(u));
+            sc.removeAttribute("integrity");
+            sc.removeAttribute("crossorigin");
+          }
+          return;
+        }
         var js = await fetchAsset(ctx, u, "text");
         if (js == null) return;
         sc.removeAttribute("src");
@@ -520,12 +538,36 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       var type = (sc.getAttribute("type") || "").toLowerCase();
       if (type && !/javascript|module/.test(type)) return;
       tasks.push(async function () {
-        sc.textContent = rewriteLoc(await scanPaths(sc.textContent, base, ctx)).replace(/<\/script/gi, "<\\/script");
+        var txt = rewriteLoc(await scanPaths(sc.textContent, base, ctx));
+        if (ctx.link && type === "module") txt = rewriteImports(txt, base);
+        sc.textContent = txt.replace(/<\/script/gi, "<\\/script");
       });
     });
-    doc.querySelectorAll("picture source").forEach(function (s) { s.remove(); });
+    if (ctx.link) {
+      doc.querySelectorAll("source[srcset]").forEach(function (el) {
+        el.setAttribute("srcset", rewriteSrcset(el.getAttribute("srcset"), abs));
+      });
+      doc.querySelectorAll("video[src],audio[src],source[src],track[src],video[poster],input[type=image][src],link[rel~=icon][href]").forEach(function (el) {
+        ["src", "poster", "href"].forEach(function (a) {
+          var v = el.getAttribute(a);
+          if (v && !/^(data:|blob:)/i.test(v)) el.setAttribute(a, proxUrl(abs(v)));
+        });
+      });
+      doc.querySelectorAll('link[rel~="modulepreload"]').forEach(function (l) { l.remove(); });
+    } else {
+      doc.querySelectorAll("picture source").forEach(function (s) { s.remove(); });
+    }
     doc.querySelectorAll("img").forEach(function (img) {
       tasks.push(async function () {
+        if (ctx.link) {
+          var set = img.getAttribute("srcset");
+          if (set) img.setAttribute("srcset", rewriteSrcset(set, abs));
+          ["src", "data-src", "data-lazy-src", "data-original"].forEach(function (a) {
+            var v = img.getAttribute(a);
+            if (v && !/^(data:|blob:)/i.test(v)) img.setAttribute(a, proxUrl(abs(v)));
+          });
+          return;
+        }
         var src = img.getAttribute("src");
         if (!src) {
           var ss = (img.getAttribute("srcset") || "").split(",")[0].trim().split(/\s+/)[0];
@@ -544,7 +586,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       });
     });
 
-    await pool(tasks, 8, function (done, total) {
+    await pool(tasks, ctx.link ? 12 : 8, function (done, total) {
       status("Downloading files " + done + " of " + total + " ...");
     });
 
@@ -563,6 +605,11 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     var shim = doc.createElement("script");
     shim.textContent = locShim(page.finalUrl).replace(/^<script>/, "").replace(/<\/script>$/, "");
     doc.head.insertBefore(shim, doc.head.firstChild);
+    if (ctx.link) {
+      var shim2 = doc.createElement("script");
+      shim2.textContent = proxyShimCode(base);
+      doc.head.insertBefore(shim2, shim.nextSibling);
+    }
     var bt = doc.createElement("base");
     bt.setAttribute("href", base);
     doc.head.insertBefore(bt, doc.head.firstChild);
@@ -591,6 +638,43 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   }
 
   var LOC_RE = /(?:(?<![\w$.])|\b(?:window|document|top|self|parent)\.)location\.(href|origin|protocol|host|hostname|port|pathname|search|hash|assign|replace|reload|toString)\b/g;
+  // ---- Large sites through a proxy ----------------------------------------------
+  // Instead of downloading and embedding every image and font, their addresses are
+  // pointed at the proxy and the browser loads them itself, as many as it needs. ES
+  // modules are loaded through the proxy too, which rewrites their imports.
+  function proxUrl(u) { return PROXY_BASE + "/proxy?url=" + encodeURIComponent(u); }
+  function proxModule(u) { return PROXY_BASE + "/proxy?mode=module&url=" + encodeURIComponent(u); }
+  function rewriteSrcset(v, abs) {
+    return v.split(/,\s+/).map(function (part) {
+      var bits = part.trim().split(/\s+/);
+      if (!bits[0] || /^data:/i.test(bits[0])) return part.trim();
+      bits[0] = proxUrl(abs(bits[0]));
+      return bits.join(" ");
+    }).join(", ");
+  }
+  // import x from "./a.js", import "./a.js", import("./a.js"): send them through the proxy.
+  function rewriteImports(js, base) {
+    return js.replace(/(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"'\n]+)\2/g, function (m, pre, q, spec) {
+      if (!/^(\.{0,2}\/|https?:\/\/)/.test(spec)) return m;      // bare names are left alone
+      try {
+        var u = new URL(spec, base);
+        return /^https?:$/.test(u.protocol) ? pre + q + proxModule(u.href) + q : m;
+      } catch (e) { return m; }
+    });
+  }
+  // Makes the page's own fetch/XHR calls go through the proxy, so data the site loads
+  // after it starts (APIs, JSON, lazy content) is not blocked.
+  function proxyShimCode(base) {
+    return '(function(){try{var P=' + JSON.stringify(PROXY_BASE) + ',B=' + JSON.stringify(base) + ';' +
+      'function w(u){try{var a=new URL(u,B);if(!/^https?:$/.test(a.protocol)||a.href.indexOf(P+"/")===0)return u;return P+"/proxy?url="+encodeURIComponent(a.href)}catch(e){return u}}' +
+      'var f=window.fetch;window.fetch=function(i,o){try{o=Object.assign({},o,{credentials:"omit"});' +
+      'if(typeof i==="string"||i instanceof URL)return f.call(this,w(String(i)),o);' +
+      'if(i&&i.url)return f.call(this,new Request(w(i.url),i),o)}catch(e){}return f.apply(this,arguments)};' +
+      'var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=w(String(u));try{this.withCredentials=false}catch(e){}return x.apply(this,arguments)};' +
+      'if(navigator.sendBeacon){var b=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=function(u,d){return b(w(String(u)),d)}}' +
+      '}catch(e){}})();';
+  }
+
   function rewriteLoc(js) {
     return js.replace(LOC_RE, "window.__nbLoc.$1").replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
   }
@@ -1103,6 +1187,9 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       '<p class="sub">Open any website inside this tab.</p>' +
       '<div><label class="lbl" for="u">Website address</label>' +
       '<input id="u" type="text" inputmode="url" placeholder="example.com" autocomplete="off" spellcheck="false"></div>' +
+      '<div><label class="lbl" for="px">Proxy address (optional)</label>' +
+      '<input id="px" type="text" inputmode="url" placeholder="https://your-proxy.workers.dev" autocomplete="off" spellcheck="false">' +
+      '<p class="foot" style="margin-top:.4rem">A proxy you run (see worker.js or server.js) lets sites that block direct access load, including large ones. Leave it empty to load sites directly.</p></div>' +
       '<button class="primary" type="submit">Open in new about:blank tab</button><div id="s" role="status"></div>' +
       '<div><label class="lbl" for="ui">Interface style</label><select id="ui">' + UI_OPTIONS + '</select></div>' +
       '<p class="foot">Links, forms and redirects open in another about:blank tab, so allow popups. If a site refuses, it keeps trying until it loads. Use Stop in the corner to give up. The loading page lets you switch the Loading Mode. Every tab has its own Reload and Admin buttons.</p></form>' +
@@ -1123,12 +1210,17 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       again.value = keep;
       again.focus();
     });
+    $("px").value = store("notblank.proxy", "");
     $("u").focus();
 
     $("f").addEventListener("submit", function (e) {
       e.preventDefault();
       var url = normalize($("u").value);
       if (!url) { status("Enter a website address."); return; }
+      var pv = $("px").value.trim();
+      if (pv) { try { new URL(/^https?:\/\//i.test(pv) ? pv : "https://" + pv); } catch (err) { status("That proxy address is not valid."); return; } }
+      save("notblank.proxy", pv);
+      applyProxy(pv);
       var list = [DIRECT];
       try { new URL(url); } catch (err) { status("That doesn't look like a valid web address."); return; }
       var w2 = w.open("about:blank", "_blank");
