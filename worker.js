@@ -51,7 +51,10 @@ export function rewriteModule(src, baseUrl, proxyOrigin) {
     if (!/^(\.{0,2}\/|https?:\/\/)/.test(spec)) return m;      // bare names are left alone
     try { const u = new URL(spec, baseUrl); return /^https?:$/.test(u.protocol) ? pre + q + mod(u.href) + q : m; } catch (e) { return m; }
   });
-  return src.replace(LOC_RE, "window.__nbLoc.$1").replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
+  return src.replace(LOC_RE, "window.__nbLoc.$1")
+    .replace(/\b(?:window|document|self|top|parent)\.location\s*=(?!=)/g, "window.__nbLoc.href=")
+    .replace(/\b(?:window|document|self|top|parent)\.location\b/g, "window.__nbLoc")
+    .replace(/\bdocument\.URL\b/g, "window.__nbLoc.href");
 }
 
 function corsHeaders(request, env) {
