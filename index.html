@@ -628,12 +628,17 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     return '<script>(function(){try{var R=new URL(' + R + ');var L=window.location;' +
       'function to(u){return new URL(u,R.href).href}' +
       'function part(k,v){var u=new URL(R.href);u[k]=v;return u.href}' +
-      'window.__nbLoc={get href(){return R.href},set href(v){L.href=to(v)},get origin(){return R.origin},' +
+      // Redirects go straight to the tab's own handler. They never touch the real
+      // location, so they cannot take the tab away even where the browser's navigation
+      // events do not fire for about:blank pages.
+      'function go(u,n){n=n||{};if(n.auto===undefined)n.auto=!(navigator.userActivation&&navigator.userActivation.isActive);' +
+      'if(window.__nbGo)window.__nbGo(u,n);else if(n.replace)L.replace(u);else L.href=u}' +
+      'window.__nbLoc={get href(){return R.href},set href(v){go(to(v))},get origin(){return R.origin},' +
       'get protocol(){return R.protocol},get host(){return R.host},get hostname(){return R.hostname},get port(){return R.port},' +
-      'get pathname(){return R.pathname},set pathname(v){L.href=part("pathname",v)},' +
-      'get search(){return R.search},set search(v){L.href=part("search",v)},' +
+      'get pathname(){return R.pathname},set pathname(v){go(part("pathname",v))},' +
+      'get search(){return R.search},set search(v){go(part("search",v))},' +
       'get hash(){return L.hash},set hash(v){L.hash=v},' +
-      'assign:function(v){L.href=to(v)},replace:function(v){L.replace(to(v))},reload:function(){L.reload()},' +
+      'assign:function(v){go(to(v))},replace:function(v){go(to(v),{replace:true})},reload:function(){if(window.__nbGo)window.__nbGo("",{reload:true});else L.reload()},' +
       'toString:function(){return R.href}};' +
       // Catch redirects the moment they happen, before the site's other scripts can leave the tab.
       'var nv=window.navigation;if(nv&&nv.addEventListener){nv.addEventListener("navigate",function(e){try{' +
