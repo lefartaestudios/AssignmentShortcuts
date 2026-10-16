@@ -185,7 +185,13 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       'button.primary{font:600 1rem ' + t.font + ';padding:.95rem 1rem;border:' + t.priBorder + ';border-radius:' + t.rSm + ';background:' + t.priBg + ';color:' + t.priFg + ';cursor:pointer}' +
       'button.primary:hover{background:' + t.priHoverBg + ';color:' + t.priHoverFg + '}' +
       '#s{min-height:1.2em;font-size:.9rem;color:' + t.muted + '}' +
-      '.foot{margin:0;color:' + t.faint + ';font-size:.8rem;line-height:1.5}';
+      '.foot{margin:0;color:' + t.faint + ';font-size:.8rem;line-height:1.5}' +
+      '.modes{display:flex;flex-direction:column;gap:.5rem;margin-top:.35rem}' +
+      '.mode{display:flex;gap:.65rem;align-items:flex-start;padding:.65rem .75rem;border:' + t.inputBorder + ';border-radius:' + t.rSm + ';background:' + t.inputBg + ';cursor:pointer}' +
+      '.mode:has(input:checked){outline:2px solid ' + t.ring + '}' +
+      '.mode input{margin:.2rem 0 0;accent-color:' + t.ring + '}' +
+      '.mode b{display:block;font-size:.92rem}.mode small{display:block;color:' + t.muted + ';line-height:1.35;margin-top:.1rem}' +
+      '.mode small.warn{color:' + t.warn + ';font-weight:600}';
   }
 
   function panelCss(t) {
@@ -749,31 +755,21 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     return LOAD_MODES.some(function (m) { return m[0] === k; }) ? k : "regular";
   }
 
-  function showLoading(w, mode) {
-    var d = w.document;
-    var radios = LOAD_MODES.map(function (m) {
+  // Markup for the Loading Mode radios, shared by the launcher (address) page.
+  function loadModeRadios(mode) {
+    return LOAD_MODES.map(function (m) {
       return '<label class="mode"><input type="radio" name="lm" value="' + m[0] + '"' + (m[0] === mode ? " checked" : "") + '>' +
         '<span><b>' + m[1] + '</b><small' + (m[0] === "force" ? ' class="warn"' : "") + '>' + m[2] + '</small></span></label>';
     }).join("");
-    d.open();
-    d.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + TITLE + '</title>' + ICON_TAG + '<style>' + pageCss() + '</style></head>' +
-      '<body><div class="card"><div class="spin"></div><h2>' + TITLE + '</h2><p id="nbstat">Loading ...</p>' +
-      '<div class="lblx">Loading Mode</div><div class="modes" role="radiogroup" aria-label="Loading Mode">' + radios + '</div></div></body></html>');
-    d.close();
-    lockTitle(w);
   }
 
-  // Choosing a mode on the loading page saves it and starts the load again in that mode.
-  function bindModePicker(w, ctx) {
-    try {
-      Array.prototype.forEach.call(w.document.querySelectorAll('input[name="lm"]'), function (input) {
-        input.addEventListener("change", function () {
-          if (!input.checked) return;
-          save("notblank.load", input.value);
-          openSite(w, ctx.url, ctx.list, input.value, null, { replace: true });
-        });
-      });
-    } catch (e) {}
+  function showLoading(w, mode) {
+    var d = w.document;
+    d.open();
+    d.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + TITLE + '</title>' + ICON_TAG + '<style>' + pageCss() + '</style></head>' +
+      '<body><div class="card"><div class="spin"></div><h2>' + TITLE + '</h2><p id="nbstat">Loading ...</p></div></body></html>');
+    d.close();
+    lockTitle(w);
   }
 
   // Tab titles and icons for the quick-pick buttons in the admin panel.
@@ -1110,6 +1106,121 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     return c;
   }
 
+  // ---- Basic safety checks ----------------------------------------------------
+  // Two things happen here: (1) a short list of gambling sites is intercepted before
+  // anything is loaded; (2) once a page's HTML is in hand, it is scanned for a few
+  // well-known malicious patterns and cleaned before it is shown. This is a basic,
+  // heuristic check, not a real antivirus: it catches obvious, known patterns, not
+  // every threat. There is no live threat feed built in, so MALWARE_DOMAINS below is
+  // just a place for you to add domains you already know are bad; it starts empty.
+  var MALWARE_DOMAINS = [];
+  var GAMBLING_DOMAINS = [
+    "bet365.com", "draftkings.com", "fanduel.com", "pokerstars.com", "bovada.lv",
+    "betmgm.com", "caesarscasino.com", "caesars.com", "partypoker.com", "888casino.com",
+    "ignitioncasino.eu", "slotomania.com", "doubledowncasino.com", "chumbacasino.com",
+    "luckylandslots.com", "wunderino.com", "unibet.com", "williamhill.com", "ladbrokes.com",
+    "paddypower.com", "betfair.com", "betway.com", "stake.com", "roobet.com", "bet-at-home.com",
+    "888sport.com", "skybet.com", "coral.co.uk", "betvictor.com", "pointsbet.com"
+  ];
+  var GAMBLING_WORDS = ["casino", "sportsbook", "slots", "slot-machine", "roulette", "blackjack", "pokersite", "bettingsite"];
+
+  // Sites claiming to offer paid Steam games for free. These are a common source of
+  // malware, and buying games is how the people who made them (and Valve) get paid.
+  // This is a keyword guess, not a verdict on any particular site, so it can be wrong.
+  var STEAM_SCAM_DOMAINS = [];   // add specific domains you already know are fake here
+  var STEAM_WORD = /steam/i;
+  // Domain words usually run together with no separators ("steamunlocked.net",
+  // "freesteamgames.com"), so this looks for the word as a substring, not a whole word.
+  var FREE_WORD = /free|crack(ed)?|unlock(ed)?|keygen|nosurvey|no-survey|generator/i;
+  var REAL_STEAM_HOSTS = ["steampowered.com", "steamcommunity.com", "steamstatic.com", "steamgames.com", "valvesoftware.com"];
+
+  function hostMatches(host, domain) { return host === domain || host.endsWith("." + domain); }
+  function classifyUrl(u) {
+    var host;
+    try { host = new URL(u).hostname.toLowerCase(); } catch (e) { return null; }
+    if (REAL_STEAM_HOSTS.some(function (d) { return hostMatches(host, d); })) return null;
+    if (MALWARE_DOMAINS.some(function (d) { return hostMatches(host, d); })) return "malware";
+    if (STEAM_SCAM_DOMAINS.some(function (d) { return hostMatches(host, d); })) return "steam";
+    if (STEAM_WORD.test(host) && FREE_WORD.test(host)) return "steam";
+    if (GAMBLING_DOMAINS.some(function (d) { return hostMatches(host, d); })) return "gambling";
+    if (/\.bet$/.test(host) || GAMBLING_WORDS.some(function (w) { return host.indexOf(w) !== -1; })) return "gambling";
+    return null;
+  }
+
+  // A handful of known-bad code patterns: cryptomining miners, obfuscated
+  // eval(atob(...)) -> document.write chains (a classic drive-by download pattern), and
+  // popup-bomb scripts. These are stripped out (the "moderate" ones) or stop the load
+  // entirely (the "critical" ones). This is necessarily incomplete.
+  var CRITICAL_PATTERNS = [
+    /coinhive|cryptonight|minero\.cc|webminepool|coin-hive|authedmine|crypto-loot|deepminer/i,
+    /eval\s*\(\s*(?:window\.)?atob\s*\([^)]*\)\s*\)\s*[\s\S]{0,80}document\.write/i,
+    /(?:window\.open\s*\([^)]*\)\s*;?\s*){3,}/i
+  ];
+  var MODERATE_PATTERNS = [
+    { tag: /<iframe\b[^>]*style\s*=\s*["'][^"']*display\s*:\s*none[^"']*["'][^>]*src\s*=\s*["']https?:\/\/[^"']+["'][^>]*>(?:[\s\S]*?<\/iframe\s*>)?/gi, label: "a hidden iframe pointing at another site" },
+    { tag: /<script\b[^>]*\bsrc\s*=\s*["']https?:\/\/[^"']*\.(?:tk|top|xyz|cc)\/[^"']*["'][^>]*><\/script>/gi, label: "a script from a disposable-domain address" }
+  ];
+
+  // Scans HTML before it is shown. Returns null if the page should be blocked outright
+  // (a critical pattern was found), or { html, removed } with the moderate hits stripped.
+  function scanForThreats(html) {
+    for (var i = 0; i < CRITICAL_PATTERNS.length; i++) if (CRITICAL_PATTERNS[i].test(html)) return null;
+    var removed = [];
+    MODERATE_PATTERNS.forEach(function (p) {
+      p.tag.lastIndex = 0;
+      if (p.tag.test(html)) { removed.push(p.label); html = html.replace(p.tag, ""); }
+    });
+    return { html: html, removed: removed };
+  }
+
+  // A light, ongoing sweep of the live page for the same hidden-iframe pattern, in case
+  // something slipped in or was added after the page loaded (e.g. by a script we could
+  // not fully analyse ahead of time).
+  function installCleanup(ctx) {
+    if (ctx.cleanTimer) return;
+    ctx.cleanTimer = setInterval(function () {
+      try {
+        if (ctx.w.closed) { clearInterval(ctx.cleanTimer); return; }
+        var d = ctx.w.document;
+        var found = 0;
+        Array.prototype.forEach.call(d.querySelectorAll("iframe[style*='display:none' i], iframe[style*='display: none' i]"), function (f) {
+          if (/^https?:\/\//i.test(f.getAttribute("src") || "")) { f.remove(); found++; }
+        });
+        if (found) ctx.setMsg("Removed " + found + " hidden item" + (found > 1 ? "s" : "") + " from this page.");
+      } catch (e) {}
+    }, 2000);
+  }
+
+  var STEAM_MSG = "Be careful of any websites that claim that you can play Steam games for free. " +
+    "A lot of them, if not all of them, are not true and most contain viruses. Also, actually pay for " +
+    "the games, support the creators and Valve Corporation themselves. They work their best to provide " +
+    "games for people to enjoy, and yes, I acknowledge you don't like paying for stuff, I know, but these " +
+    "fake Steam websites are not worth the risk. Support the creators, never go to these websites.";
+
+  function showBlocked(w, kind, url) {
+    var d = w.document;
+    var title = kind === "gambling" ? "Gambling site blocked" : kind === "steam" ? "This looks like a fake \"free Steam games\" site" : "This site looks unsafe";
+    var msg = kind === "gambling"
+      ? "NO! We will NOT let you gamble. It's not worth losing your money on some slot machines. Please put your money to good use and actually get a job."
+      : kind === "steam" ? STEAM_MSG
+      : "This site was blocked because it matched a known pattern for malicious code. Visiting it is not recommended.";
+    d.open();
+    d.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + TITLE + '</title>' + ICON_TAG + '<style>' + pageCss() + '</style></head>' +
+      '<body><div class="card"><h2>' + title + '</h2><p id="m"></p>' +
+      (kind === "steam" ? '<p style="font-size:.8rem;opacity:.75">- Camden Northern</p>' : '') +
+      '<p><a id="back" href="javascript:void 0">Go back</a> &nbsp;&middot;&nbsp; <a id="go" href="javascript:void 0">Load it anyway</a></p></div></body></html>');
+    d.close();
+    d.getElementById("m").textContent = msg;
+    lockTitle(w);
+    var ctx = getCtx(w);
+    d.getElementById("back").addEventListener("click", function () { ctx.step(0); });
+    d.getElementById("go").addEventListener("click", function () {
+      ctx.overrideSafety = ctx.overrideSafety || {};
+      ctx.overrideSafety[url] = true;
+      openSite(w, url, ctx.list, ctx.mode, null, { replace: true });
+    });
+  }
+
   async function openSite(w, url, list, mode, extraStatus, nav) {
     if (w.closed) return;
     nav = nav || {};
@@ -1119,8 +1230,11 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     if (!ctx.hasPage) ctx.url = url;
     var token = ++ctx.token;
     ctx.redirects = nav.auto ? ctx.redirects + 1 : 0;   // counts back-to-back automatic redirects
-    if (!ctx.hasPage) { showLoading(w, mode); bindModePicker(w, ctx); }
+    if (!ctx.hasPage) showLoading(w, mode);
     installReload(ctx);
+    installCleanup(ctx);
+    var kind = classifyUrl(url);
+    if (kind && !(ctx.overrideSafety && ctx.overrideSafety[url])) { showBlocked(w, kind, url); ctx.ensure(); return; }
     var force = mode === "force";
 
     var status = function (t) {
@@ -1171,12 +1285,20 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     };
     var done = function (html, finalUrl, refresh) {
       if (token !== ctx.token || w.closed) return;
+      var scanned = scanForThreats(html);
+      if (!scanned) { showBlocked(w, "malware", url); ctx.ensure(); return; }
+      html = scanned.html;
       commit(finalUrl);
       installHooks(ctx);            // before the page's scripts run, so early redirects are caught
       writeHtml(w, html);
       ctx.hasPage = true;
       installHooks(ctx);
       ctx.setMsg("");
+      if (scanned.removed.length) {
+        var rmsg = "Cleaned up " + scanned.removed.length + " unsafe item" + (scanned.removed.length > 1 ? "s" : "") + " from this page (" + scanned.removed.join(", ") + ").";
+        ctx.setMsg(rmsg);
+        setTimeout(function () { if (ctx.lastMsg === rmsg) ctx.setMsg(""); }, 10000);
+      }
       if (nav.note) {
         var note = nav.note;
         ctx.setMsg(note);
@@ -1216,9 +1338,10 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       '<div><label class="lbl" for="px">Proxy address (optional)</label>' +
       '<input id="px" type="text" inputmode="url" placeholder="https://your-proxy.workers.dev" autocomplete="off" spellcheck="false">' +
       '<p class="foot" style="margin-top:.4rem">A proxy you run (see worker.js or server.js) lets sites that block direct access load, including large ones. Leave it empty to load sites directly.</p></div>' +
+      '<div><label class="lbl">Loading Mode</label><div class="modes" role="radiogroup" aria-label="Loading Mode">' + loadModeRadios(loadKey()) + '</div></div>' +
       '<button class="primary" type="submit">Open in new about:blank tab</button><div id="s" role="status"></div>' +
       '<div><label class="lbl" for="ui">Interface style</label><select id="ui">' + UI_OPTIONS + '</select></div>' +
-      '<p class="foot">Links, forms and redirects open in another about:blank tab, so allow popups. If a site refuses, it keeps trying until it loads. Use Stop in the corner to give up. The loading page lets you switch the Loading Mode. Every tab has its own Reload and Admin buttons.</p></form>' +
+      '<p class="foot">Links, forms and redirects open in another about:blank tab, so allow popups. If a site refuses, it keeps trying until it loads. Use Stop in the corner to give up. Every tab has its own Reload and Admin buttons.</p></form>' +
       '</main></body></html>');
 
     d.close();
@@ -1249,10 +1372,13 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       applyProxy(pv);
       var list = [DIRECT];
       try { new URL(url); } catch (err) { status("That doesn't look like a valid web address."); return; }
+      var lm = d.querySelector('input[name="lm"]:checked');
+      var mode = lm ? lm.value : loadKey();
+      save("notblank.load", mode);
       var w2 = w.open("about:blank", "_blank");
       if (!w2) { status("Popup blocked. Allow popups for this site and try again."); return; }
       w2.document.title = TITLE;
-      openSite(w2, url, list, loadKey(), status);
+      openSite(w2, url, list, mode, status);
     });
   }
 
