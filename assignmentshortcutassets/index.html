@@ -279,7 +279,9 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   function save(key, val) {
     try { window.localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
   }
-  applyProxy(store("notblank.proxy", ""));
+  // Default proxy, used until the person clears or changes the field on the address page.
+  var DEFAULT_PROXY = "https://educationalcalculatornotesmathandsciencejournal.camdennorthern3.workers.dev/";
+  applyProxy(store("notblank.proxy", DEFAULT_PROXY));
 
   // ---- Loading engine ---------------------------------------------------
   var ctxs = new WeakMap(); // one state object per opened tab
@@ -1370,7 +1372,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       again.value = keep;
       again.focus();
     });
-    $("px").value = store("notblank.proxy", "");
+    $("px").value = store("notblank.proxy", DEFAULT_PROXY);
     $("u").focus();
 
     $("f").addEventListener("submit", function (e) {
