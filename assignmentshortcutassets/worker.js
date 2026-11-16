@@ -20,8 +20,15 @@
 //   GET /https://example.com/page
 //       Older address form; same as browse mode.
 
-const MAX_REDIRECTS = 6;
-const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_REDIRECTS = 8;
+// Responses stream straight through to the browser rather than being buffered in the
+// Worker, so this mainly guards against a response with no declared size turning out to
+// be unexpectedly huge (see capStream below). Actual limits also depend on your
+// Cloudflare plan: the free plan allows roughly 100-200MB response bodies.
+const MAX_BYTES = 200 * 1024 * 1024;
+// A smaller cap for the two cases that must be fully read into memory to rewrite them
+// (an ES module's imports, or HTML in module mode's text path) rather than streamed.
+const MAX_TEXT_BYTES = 60 * 1024 * 1024;
 const FORWARD = ["user-agent", "accept", "accept-language", "content-type", "range"];
 const STRIP = ["x-frame-options", "content-security-policy", "content-security-policy-report-only", "set-cookie",
   "content-encoding", "content-length", "transfer-encoding", "strict-transport-security",
@@ -68,6 +75,38 @@ function corsHeaders(request, env) {
   if (allowed.includes("*")) h.set("Access-Control-Allow-Origin", "*");
   else if (origin && allowed.includes(origin)) { h.set("Access-Control-Allow-Origin", origin); h.set("Vary", "Origin"); }
   return h;
+}
+
+// Guards a streamed, passed-through response: most of the time Content-Length already
+// told us the size up front, but a response sent in chunks with no declared length could
+// otherwise grow without limit, so this counts bytes as they flow through and cuts the
+// stream off if it goes over cap.
+function capStream(cap) {
+  let total = 0;
+  return new TransformStream({
+    transform(chunk, controller) {
+      total += chunk.byteLength || chunk.length || 0;
+      if (total > cap) { controller.error(new Error("Response exceeded the proxy's size limit")); return; }
+      controller.enqueue(chunk);
+    }
+  });
+}
+
+// Reads a body fully as text, for the two cases that need the whole string to rewrite it,
+// without ever holding more than cap bytes at once.
+async function readTextCapped(body, cap) {
+  const reader = body.getReader();
+  var total = 0, chunks = [];
+  for (;;) {
+    var step = await reader.read();
+    if (step.done) break;
+    total += step.value.byteLength;
+    if (total > cap) { try { reader.cancel(); } catch (e) {} throw new Error("Response too large to rewrite"); }
+    chunks.push(step.value);
+  }
+  var buf = new Uint8Array(total), offset = 0;
+  for (var i = 0; i < chunks.length; i++) { buf.set(chunks[i], offset); offset += chunks[i].byteLength; }
+  return new TextDecoder("utf-8").decode(buf);
 }
 
 function fail(cors, status, message) {
@@ -137,8 +176,12 @@ export default {
       if (!["GET", "HEAD"].includes(request.method)) body = await request.arrayBuffer();
 
       const { res: upstream, finalUrl } = await fetchFollow(target.href, { method: request.method, headers, body });
+
+      const type0 = upstream.headers.get("Content-Type") || "";
+      const needsText = moduleMode || (browse && type0.includes("text/html"));
+      const cap = needsText ? MAX_TEXT_BYTES : MAX_BYTES;
       const declared = Number(upstream.headers.get("content-length"));
-      if (declared > MAX_BYTES) return fail(cors, 413, "That file is too large for the proxy");
+      if (declared > cap) return fail(cors, 413, "That file is too large for the proxy");
 
       // Clean up the response so it can be read by the page and shown in a frame.
       const out = new Headers(upstream.headers);
@@ -149,11 +192,17 @@ export default {
 
       const type = out.get("Content-Type") || "";
       if (moduleMode) {
+        var text;
+        try { text = await readTextCapped(upstream.body, cap); }
+        catch (e) { return fail(cors, 413, "That file is too large for the proxy"); }
         out.set("Content-Type", "text/javascript; charset=utf-8");
-        return new Response(rewriteModule(await upstream.text(), finalUrl, self), { status: upstream.status, headers: out });
+        return new Response(rewriteModule(text, finalUrl, self), { status: upstream.status, headers: out });
       }
       if (!browse || !type.includes("text/html")) {
-        return new Response(request.method === "HEAD" ? null : upstream.body, { status: upstream.status, headers: out });
+        // Streamed straight through, never buffered, so large images/video/fonts/scripts work.
+        var passBody = request.method === "HEAD" ? null : upstream.body;
+        if (passBody) passBody = passBody.pipeThrough(capStream(cap));
+        return new Response(passBody, { status: upstream.status, headers: out });
       }
 
       // Browse mode: rewrite links in HTML and patch fetch/XHR so the page keeps using the proxy.
@@ -174,7 +223,7 @@ var ox=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u)
         .on("script[src],img[src],iframe[src],source[src],video[src],audio[src]", { element(el) { fix(el, "src"); } })
         .on("form[action]", { element(el) { fix(el, "action"); } })
         .on("meta[http-equiv]", { element(el) { if (/^refresh$/i.test(el.getAttribute("http-equiv") || "")) el.remove(); } })
-        .transform(new Response(upstream.body, { status: upstream.status, headers: out }));
+        .transform(new Response(upstream.body.pipeThrough(capStream(cap)), { status: upstream.status, headers: out }));
     } catch (e) {
       const timedOut = e && (e.name === "TimeoutError" || e.name === "AbortError");
       return fail(cors, timedOut ? 504 : 502, timedOut ? "The site took too long to answer" : "Proxy error: " + e.message);
