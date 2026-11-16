@@ -35,9 +35,15 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || "*").split(",").map((s) => s.tri
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 120;
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 
-const MAX_REDIRECTS = 6;
-const TIMEOUT_MS = 40000;
-const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_REDIRECTS = 8;
+const TIMEOUT_MS = 90000;
+// Binary/passthrough responses (images, video, fonts, plain scripts, ...) are streamed
+// straight through rather than held in memory, so this can be generous. Only HTML
+// (browse mode) and JS modules need their full text buffered to rewrite it, so those get
+// their own, smaller cap further down.
+const MAX_BYTES = 250 * 1024 * 1024;
+const MAX_TEXT_BYTES = 60 * 1024 * 1024;
+const REQUEST_MAX_BYTES = 25 * 1024 * 1024; // data the visitor's own page sends up (POSTs)
 const DEFAULT_UA = "Mozilla/5.0 (compatible; AssignmentShortcuts/2.0)";
 
 // Headers that must not be passed on: they would block framing, tie the response to the
@@ -158,13 +164,20 @@ async function handleProxy(req, res, reqUrl) {
     let body;
     if (!["GET", "HEAD"].includes(req.method)) {
       const chunks = []; let size = 0;
-      for await (const c of req) { size += c.length; if (size > MAX_BYTES) return fail(res, 413, "Request too large"); chunks.push(c); }
+      for await (const c of req) { size += c.length; if (size > REQUEST_MAX_BYTES) return fail(res, 413, "Request too large"); chunks.push(c); }
       body = Buffer.concat(chunks);
     }
     const { res: r, finalUrl } = await fetchFollow(target, { method: req.method, headers, body });
 
+    const type = r.headers.get("content-type") || "";
+    // Only these two cases need the full text in memory, to rewrite it; everything else
+    // (images, video, fonts, plain scripts, stylesheets, JSON, ...) is streamed straight
+    // through below without ever being buffered, which is what lets large files work.
+    const needsText = mode === "module" || (browse && type.includes("text/html"));
+    const cap = needsText ? MAX_TEXT_BYTES : MAX_BYTES;
+
     const declared = Number(r.headers.get("content-length"));
-    if (declared > MAX_BYTES) return fail(res, 413, "That file is too large for the proxy");
+    if (declared > cap) return fail(res, 413, "That file is too large for the proxy");
 
     for (const [k, v] of r.headers) if (!STRIP.has(k.toLowerCase())) res.setHeader(k, v);
     res.setHeader("x-final-url", finalUrl);
@@ -172,29 +185,46 @@ async function handleProxy(req, res, reqUrl) {
     res.statusCode = r.status;
     if (req.method === "HEAD") return res.end();
 
-    const type = r.headers.get("content-type") || "";
-    const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length > MAX_BYTES) return fail(res, 413, "That file is too large for the proxy");
-
     const proto = req.headers["x-forwarded-proto"] || "http";
     const origin = PUBLIC_URL || `${proto}://${req.headers.host}`;
 
-    if (mode === "module") {
-      res.setHeader("Content-Type", "text/javascript; charset=utf-8");
-      return res.end(rewriteModule(buf.toString("utf8"), finalUrl, origin));
-    }
-
-    if (browse && type.includes("text/html")) {
-      let html = buf.toString("utf8");
+    if (needsText) {
+      // Content-Length isn't always sent (chunked responses), so also count bytes as they
+      // arrive and bail out early rather than buffering an unbounded amount of text.
+      const chunks = []; let total = 0;
+      for await (const chunk of r.body) {
+        total += chunk.length;
+        if (total > cap) return fail(res, 413, "That file is too large for the proxy");
+        chunks.push(chunk);
+      }
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (mode === "module") {
+        res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+        return res.end(rewriteModule(text, finalUrl, origin));
+      }
+      let html = text;
       const tag = shim(origin, finalUrl);
       html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + tag) : tag + html;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.end(html);
     }
-    res.end(buf);
+
+    // Passthrough: stream the body straight to the visitor as it arrives, with a running
+    // byte count that cuts the connection if a response with no declared size turns out
+    // to be larger than the cap, so one huge, unmeasured download can't run away.
+    let sent = 0;
+    try {
+      for await (const chunk of r.body) {
+        sent += chunk.length;
+        if (sent > cap) { res.destroy(); return; }
+        if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
+      }
+      res.end();
+    } catch (e) { try { res.destroy(); } catch (e2) {} }
   } catch (e) {
     const timedOut = e && (e.name === "TimeoutError" || e.name === "AbortError");
-    fail(res, timedOut ? 504 : 502, timedOut ? "The site took too long to answer" : "Proxy error: " + e.message);
+    if (!res.headersSent) fail(res, timedOut ? 504 : 502, timedOut ? "The site took too long to answer" : "Proxy error: " + e.message);
+    else { try { res.destroy(); } catch (e2) {} }
   }
 }
 
