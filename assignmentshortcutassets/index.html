@@ -218,7 +218,14 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       'input,select{font:13px ' + F + ';padding:9px 10px;border:' + t.inputBorder + ';background:' + t.inputBg + ';color:' + t.text + ';border-radius:' + t.rIn + ';min-width:0}' +
       '.row{display:flex;gap:6px;flex-wrap:wrap}' +
       '.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;box-shadow:none;font-weight:500}.chip img{border-radius:3px}' +
-      '.sec button{box-shadow:none;align-self:flex-start}';
+      '.sec button{box-shadow:none;align-self:flex-start}' +
+      '.liveprompt{width:min(23rem,calc(100vw - 24px));box-sizing:border-box;background:' + t.card + ';border:' + t.cardBorder + ';border-radius:' + t.rPanel + ';padding:12px;display:flex;flex-direction:column;gap:8px;box-shadow:' + t.panelShadow + '}' +
+      '.liveprompt[hidden]{display:none}' +
+      '.liveprompt .lp-msg{font-size:12.5px;line-height:1.45;color:' + t.text + '}' +
+      '.liveprompt .lp-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}' +
+      '.liveprompt label.lp-remember{display:flex;align-items:center;gap:5px;font-size:11.5px;color:' + t.muted + ';cursor:pointer}' +
+      '.liveprompt label.lp-remember input{width:auto;padding:0}' +
+      '.liveprompt .lp-btns{margin-left:auto;display:flex;gap:6px}';
   }
 
   function showError(w, msg, link, details) {
@@ -278,6 +285,12 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   }
   function save(key, val) {
     try { window.localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+  }
+  // Remembered "allow"/"block" answers, by host, for sites asking to connect directly to
+  // their own servers (WebSocket/EventSource) instead of going through the proxy.
+  function liveConnDecision(host) { return store("notblank.liveconn", {})[host]; }
+  function saveLiveConnDecision(host, val) {
+    var m = store("notblank.liveconn", {}); m[host] = val; save("notblank.liveconn", m);
   }
   // Default proxy, used until the person clears or changes the field on the address page.
   var DEFAULT_PROXY = "https://educationalcalculatornotesmathandsciencejournal.camdennorthern3.workers.dev/";
@@ -623,10 +636,13 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     var shim = doc.createElement("script");
     shim.textContent = locShim(page.finalUrl).replace(/^<script>/, "").replace(/<\/script>$/, "");
     doc.head.insertBefore(shim, doc.head.firstChild);
+    var liveShim = doc.createElement("script");
+    liveShim.textContent = liveConnShim(page.finalUrl);
+    doc.head.insertBefore(liveShim, shim.nextSibling);
     if (ctx.link) {
       var shim2 = doc.createElement("script");
       shim2.textContent = proxyShimCode(base);
-      doc.head.insertBefore(shim2, shim.nextSibling);
+      doc.head.insertBefore(shim2, liveShim.nextSibling);
     }
     var bt = doc.createElement("base");
     bt.setAttribute("href", base);
@@ -709,6 +725,61 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       'if(typeof HTMLScriptElement!=="undefined"){var sd=Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype,"src");' +
       'if(sd&&sd.set)Object.defineProperty(HTMLScriptElement.prototype,"src",{get:sd.get,set:function(v){sd.set.call(this,ws(String(v)))},configurable:true});' +
       'var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){if(this instanceof HTMLScriptElement&&String(n).toLowerCase()==="src")v=ws(String(v));return sa.call(this,n,v)}}' +
+      '}catch(e){}})();';
+  }
+
+  // Some sites need a live connection to their own servers for things like chat,
+  // multiplayer or live updates (WebSocket / EventSource), which the proxy can't carry —
+  // it would mean this tab talking directly to that site's servers instead. Rather than
+  // silently allowing or silently breaking that, the first attempt pauses and asks the
+  // person via ctx.showLivePrompt (installHooks wires window.__nbLiveAsk to it); every
+  // later attempt from the same page reuses that one answer.
+  function liveConnShim(siteUrl) {
+    var SITE = JSON.stringify(siteUrl).replace(/</g, "\\u003c");
+    return '(function(){try{var SITE=' + SITE + ';var HOST="";try{HOST=new URL(SITE).hostname}catch(e){}' +
+      'var OrigWS=window.WebSocket,OrigES=window.EventSource;if(!OrigWS&&!OrigES)return;' +
+      'var pending=null;' +
+      'function ask(){if(pending)return pending;pending=new Promise(function(res){' +
+        'if(window.__nbLiveAsk)window.__nbLiveAsk(HOST,res);else res(false);' +
+      '});return pending}' +
+      'function fire(list,ev){(list||[]).forEach(function(f){try{f(ev)}catch(e){}})}' +
+      'if(OrigWS)window.WebSocket=function(url,protocols){' +
+        'var real=null,buffered=[],closed=false,self={readyState:0,CONNECTING:0,OPEN:1,CLOSING:2,CLOSED:3,' +
+          'url:String(url),binaryType:"blob",onopen:null,onmessage:null,onerror:null,onclose:null,' +
+          'send:function(){var a=arguments;if(real)real.send.apply(real,a);else buffered.push(a)},' +
+          'close:function(){closed=true;self.readyState=3;if(real)real.close()},' +
+          'addEventListener:function(t,f){self["_"+t]=self["_"+t]||[];self["_"+t].push(f)},' +
+          'removeEventListener:function(t,f){var l=self["_"+t];if(l){var i=l.indexOf(f);if(i>-1)l.splice(i,1)}}};' +
+        'ask().then(function(allow){' +
+          'if(closed)return;' +
+          'if(!allow){self.readyState=3;var ev=new Event("error");if(self.onerror)self.onerror(ev);fire(self._error,ev);' +
+            'var ce;try{ce=new CloseEvent("close")}catch(e){ce=new Event("close")}if(self.onclose)self.onclose(ce);fire(self._close,ce);return}' +
+          'try{real=new OrigWS(url,protocols)}catch(e){self.readyState=3;return}' +
+          'real.binaryType=self.binaryType;' +
+          'real.onopen=function(e){self.readyState=1;if(self.onopen)self.onopen(e);fire(self._open,e)};' +
+          'real.onmessage=function(e){if(self.onmessage)self.onmessage(e);fire(self._message,e)};' +
+          'real.onerror=function(e){if(self.onerror)self.onerror(e);fire(self._error,e)};' +
+          'real.onclose=function(e){self.readyState=3;if(self.onclose)self.onclose(e);fire(self._close,e)};' +
+          'buffered.forEach(function(a){real.send.apply(real,a)});buffered=[];' +
+        '});' +
+        'return self;' +
+      '};' +
+      'if(OrigES)window.EventSource=function(url,opts){' +
+        'var real=null,closed=false,self={readyState:0,CONNECTING:0,OPEN:1,CLOSED:2,url:String(url),' +
+          'onopen:null,onmessage:null,onerror:null,' +
+          'close:function(){closed=true;self.readyState=2;if(real)real.close()},' +
+          'addEventListener:function(t,f){self["_"+t]=self["_"+t]||[];self["_"+t].push(f)},' +
+          'removeEventListener:function(t,f){var l=self["_"+t];if(l){var i=l.indexOf(f);if(i>-1)l.splice(i,1)}}};' +
+        'ask().then(function(allow){' +
+          'if(closed)return;' +
+          'if(!allow){self.readyState=2;var ev=new Event("error");if(self.onerror)self.onerror(ev);fire(self._error,ev);return}' +
+          'try{real=new OrigES(url,opts)}catch(e){self.readyState=2;return}' +
+          'real.onopen=function(e){self.readyState=1;if(self.onopen)self.onopen(e);fire(self._open,e)};' +
+          'real.onmessage=function(e){if(self.onmessage)self.onmessage(e);fire(self._message,e)};' +
+          'real.onerror=function(e){if(self.onerror)self.onerror(e);fire(self._error,e)};' +
+        '});' +
+        'return self;' +
+      '};' +
       '}catch(e){}})();';
   }
 
@@ -857,6 +928,10 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
         '<div class="row"><button id="apply" class="pri" type="button">Apply</button><button id="reset" type="button">Reset</button></div>' +
         '<div class="sec"><span class="lbl">Interface style</span><select id="uis" aria-label="Interface style">' + UI_OPTIONS + '</select></div>' +
         '</div>' +
+        '<div class="liveprompt" hidden><p class="lp-msg"></p><div class="lp-row">' +
+        '<label class="lp-remember"><input type="checkbox" id="lpRemember"> Remember for this site</label>' +
+        '<span class="lp-btns"><button id="lpBlock" type="button">Block</button><button id="lpAllow" class="pri" type="button">Allow</button></span>' +
+        '</div></div>' +
         '<div class="bar"><span class="msg" role="status"></span>' +
         '<button id="stop" type="button" hidden title="Stop trying to load this site">Stop</button>' +
         '<button id="frm" type="button" hidden title="Show the site in a frame instead of extracting it">Show in frame</button>' +
@@ -913,6 +988,26 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       });
       ctx.retryEls = [$("#stop"), $("#frm")];
       ctx.retryEls.forEach(function (b) { b.hidden = !ctx.retrying; });
+      (function () {
+        var lp = $(".liveprompt"), lpMsg = $(".lp-msg"), lpRemember = $("#lpRemember"),
+          lpAllow = $("#lpAllow"), lpBlock = $("#lpBlock");
+        ctx.showLivePrompt = function (host, cb) {
+          lpMsg.textContent = (host || "This site") + " wants to connect this tab directly to its own servers " +
+            "(for things like chat, multiplayer or live updates), bypassing the proxy. Allow it?";
+          lpRemember.checked = false;
+          lp.hidden = false;
+          function settle(allow) {
+            lp.hidden = true;
+            lpAllow.removeEventListener("click", onAllow);
+            lpBlock.removeEventListener("click", onBlock);
+            cb(allow, lpRemember.checked);
+          }
+          function onAllow() { settle(true); }
+          function onBlock() { settle(false); }
+          lpAllow.addEventListener("click", onAllow);
+          lpBlock.addEventListener("click", onBlock);
+        };
+      })();
       $("#stop").addEventListener("click", function () {
         ctx.token++;                      // cancels the retry loop
         ctx.showRetry(false);
@@ -1068,6 +1163,22 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     }
     try {
       w.__nbGo = function (u, nav) { if (nav && nav.reload) ctx.step(0); else ctx.go(u, nav); };
+    } catch (e) {}
+    try {
+      // Bridges the page's WebSocket/EventSource shim (liveConnShim) to the person: a
+      // remembered choice for this host answers immediately, otherwise it shows the
+      // corner prompt (ctx.showLivePrompt, from installReload) and remembers the answer
+      // only if they ticked "Remember".
+      w.__nbLiveAsk = function (host, resolve) {
+        var saved = liveConnDecision(host);
+        if (saved === "allow" || saved === "block") { resolve(saved === "allow"); return; }
+        if (ctx.showLivePrompt) {
+          ctx.showLivePrompt(host, function (allow, remember) {
+            if (remember) saveLiveConnDecision(host, allow ? "allow" : "block");
+            resolve(allow);
+          });
+        } else resolve(false);
+      };
     } catch (e) {}
     d.addEventListener("click", ctx.onClick);
     d.addEventListener("auxclick", ctx.onClick);
