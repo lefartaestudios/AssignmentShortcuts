@@ -51,12 +51,16 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
 <div class="uipick"><label for="ui">Interface</label><select id="ui"><option value="futuristic">Futuristic Like</option><option value="simple">Simplastic Prototype</option></select></div>
 <script>
 (function () {
-  var TITLE = "About:NotBlank";                 // loading pages and the sites you open
+  var TITLE = "About:NotBlank Virtual Machine"; // loading pages and the sites you open
   var LAUNCHER_TITLE = "Assignment Shortcut";   // the address page
   // Default tab icon: favicon.ico next to this page (about:blank tabs need the full address).
   var HOME_ICON = /^https?:$/.test(location.protocol)
     ? new URL("favicon.ico", location.href).href
     : "https://raw.githubusercontent.com/lefartaestudios/AssignmentShortcuts/refs/heads/main/favicon.ico";
+  // The TABT Games hub, next to this page (same pattern as HOME_ICON above).
+  var TABT_GAMES_URL = /^https?:$/.test(location.protocol)
+    ? new URL("TABT Games/", location.href).href
+    : "https://lefartaestudios.github.io/AssignmentShortcuts/TABT%20Games/";
   // Optional: your own proxy (the Cloudflare Worker in worker.js or the Node server in
   // server.js). Its address is typed into the launcher page and saved; with it empty,
   // sites are requested directly from the browser. applyProxy() fills in the values below.
@@ -248,16 +252,22 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     PROXY_BASE = PROXY_URL.replace(/\/+$/, "");
     CAN_HTTP = PROXY_BASE ? true : location.protocol !== "https:";
     if (PROXY_BASE) {
-      // Through a proxy, big sites are fine: more and larger files, and more patience.
-      MAX_FILES = 600; MAX_BYTES = 120 * 1024 * 1024; MAX_FILE = 25 * 1024 * 1024;
-      PAGE_TIMEOUT = 45000; ASSET_TIMEOUT = 25000;
+      // Through a proxy, big sites are fine: images, video, fonts and module scripts are
+      // pointed at the proxy and loaded by the browser itself rather than embedded, and
+      // worker.js/server.js now stream those straight through instead of buffering them,
+      // so these ceilings mainly guard against one runaway site, not real sites in general.
+      MAX_FILES = 1200; MAX_BYTES = 300 * 1024 * 1024; MAX_FILE = 80 * 1024 * 1024;
+      PAGE_TIMEOUT = 90000; ASSET_TIMEOUT = 45000;
       DIRECT = { name: "Your proxy", frame: true, binary: true,
         build: function (u) { return PROXY_BASE + "/proxy?url=" + encodeURIComponent(u); },
         finalOf: function (res) { return res.headers.get("x-final-url"); },
         frameUrl: function (u) { return PROXY_BASE + "/proxy?mode=browse&url=" + encodeURIComponent(u); } };
     } else {
-      MAX_FILES = 200; MAX_BYTES = 30 * 1024 * 1024; MAX_FILE = 6 * 1024 * 1024;
-      PAGE_TIMEOUT = 20000; ASSET_TIMEOUT = 12000;
+      // No proxy: the browser fetches and embeds files itself, which only works for sites
+      // that allow cross-origin reads, but raising the ceiling still helps large pages on
+      // your own domain or on CORS-friendly sites.
+      MAX_FILES = 350; MAX_BYTES = 60 * 1024 * 1024; MAX_FILE = 12 * 1024 * 1024;
+      PAGE_TIMEOUT = 30000; ASSET_TIMEOUT = 18000;
       DIRECT = { name: "Direct connection", frame: true, binary: true, build: function (u) { return u; } };
     }
   }
@@ -470,7 +480,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       try { urls[m[2]] = new URL(m[2].trim(), cssUrl).href; } catch (e) {}
     }
     var keys = Object.keys(urls), got = {};
-    await pool(keys.map(function (k) { return async function () { got[k] = ctx.link ? proxUrl(urls[k]) : ((await fetchAsset(ctx, urls[k], "data")) || urls[k]); }; }), 6);
+    await pool(keys.map(function (k) { return async function () { got[k] = ctx.link ? proxUrl(urls[k]) : ((await fetchAsset(ctx, urls[k], "data")) || urls[k]); }; }), ctx.link ? 16 : 8);
     return css.replace(re, function (all, q, u) {
       return got[u] ? 'url("' + got[u] + '")' : all;
     });
@@ -487,7 +497,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
     var abs = function (u) { try { return new URL(u, base).href; } catch (e) { return u; } };
 
     var ctx = {
-      cache: new Map(), count: 0, bytes: 0, finalOf: {}, pathBudget: PROXY_BASE ? 0 : 40, link: !!PROXY_BASE,
+      cache: new Map(), count: 0, bytes: 0, finalOf: {}, pathBudget: PROXY_BASE ? 0 : 70, link: !!PROXY_BASE,
       assetProxies: list.filter(function (p) { return p.binary; })
     };
 
@@ -592,7 +602,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       });
     });
 
-    await pool(tasks, ctx.link ? 12 : 8, function (done, total) {
+    await pool(tasks, ctx.link ? 20 : 10, function (done, total) {
       status("Downloading files " + done + " of " + total + " ...");
     });
 
@@ -731,7 +741,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       return async function () {
         try { var du = await fetchAsset(ctx, new URL(k, base).href, "data"); if (du) got[k] = du; } catch (e) {}
       };
-    }), 6);
+    }), 8);
     return text.replace(new RegExp(PATH_RE.source, "gi"), function (all, q, path, qs) {
       var k = path + (qs || "");
       return got[k] ? q + got[k] + q : all;
@@ -1340,6 +1350,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       '<p class="foot" style="margin-top:.4rem">A proxy you run (see worker.js or server.js) lets sites that block direct access load, including large ones. Leave it empty to load sites directly.</p></div>' +
       '<div><label class="lbl">Loading Mode</label><div class="modes" role="radiogroup" aria-label="Loading Mode">' + loadModeRadios(loadKey()) + '</div></div>' +
       '<button class="primary" type="submit">Open in new about:blank tab</button><div id="s" role="status"></div>' +
+      '<p class="foot" style="margin:.2rem 0 0"><a href="' + TABT_GAMES_URL + '" target="_blank" rel="noopener noreferrer" style="color:#5eead4;text-decoration:none;font-weight:600">\uD83C\uDFAE TABT Games \u2014 Take A Break To...</a></p>' +
       '<div><label class="lbl" for="ui">Interface style</label><select id="ui">' + UI_OPTIONS + '</select></div>' +
       '<p class="foot">Links, forms and redirects open in another about:blank tab, so allow popups. If a site refuses, it keeps trying until it loads. Use Stop in the corner to give up. Every tab has its own Reload and Admin buttons.</p></form>' +
       '</main></body></html>');
