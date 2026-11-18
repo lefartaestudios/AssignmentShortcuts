@@ -57,10 +57,6 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
   var HOME_ICON = /^https?:$/.test(location.protocol)
     ? new URL("favicon.ico", location.href).href
     : "https://raw.githubusercontent.com/lefartaestudios/AssignmentShortcuts/refs/heads/main/favicon.ico";
-  // The TABT Games hub, next to this page (same pattern as HOME_ICON above).
-  var TABT_GAMES_URL = /^https?:$/.test(location.protocol)
-    ? new URL("TABT Games/", location.href).href
-    : "https://lefartaestudios.github.io/AssignmentShortcuts/TABT%20Games/";
   // Optional: your own proxy (the Cloudflare Worker in worker.js or the Node server in
   // server.js). Its address is typed into the launcher page and saved; with it empty,
   // sites are requested directly from the browser. applyProxy() fills in the values below.
@@ -1463,7 +1459,6 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
       '<p class="foot" style="margin-top:.4rem">A proxy you run (see worker.js or server.js) lets sites that block direct access load, including large ones. Leave it empty to load sites directly.</p></div>' +
       '<div><label class="lbl">Loading Mode</label><div class="modes" role="radiogroup" aria-label="Loading Mode">' + loadModeRadios(loadKey()) + '</div></div>' +
       '<button class="primary" type="submit">Open in new about:blank tab</button><div id="s" role="status"></div>' +
-      '<p class="foot" style="margin:.2rem 0 0"><a href="' + TABT_GAMES_URL + '" target="_blank" rel="noopener noreferrer" style="color:#5eead4;text-decoration:none;font-weight:600">\uD83C\uDFAE TABT Games \u2014 Take A Break To...</a></p>' +
       '<div><label class="lbl" for="ui">Interface style</label><select id="ui">' + UI_OPTIONS + '</select></div>' +
       '<p class="foot">Links, forms and redirects open in another about:blank tab, so allow popups. If a site refuses, it keeps trying until it loads. Use Stop in the corner to give up. Every tab has its own Reload and Admin buttons.</p></form>' +
       '</main></body></html>');
