@@ -932,6 +932,7 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
         '<button id="stop" type="button" hidden title="Stop trying to load this site">Stop</button>' +
         '<button id="frm" type="button" hidden title="Show the site in a frame instead of extracting it">Show in frame</button>' +
         '<button id="adm" type="button" title="Open the tab settings panel">Admin</button>' +
+        '<button id="share" type="button" title="Share another browser tab and show it in an overlay" aria-label="Share another tab">🖥</button>' +
         '<button id="rl" type="button" title="Reload this site">Reload</button></div></div>';
       root.innerHTML = css + html;
       var $ = function (sel) { return root.querySelector(sel); };
@@ -982,6 +983,83 @@ h1{margin:0;font-size:clamp(1.45rem,4.6vw,2.1rem);line-height:1.25;letter-spacin
         panel.hidden = !ctx.panelOpen;
         if (ctx.panelOpen) fill();
       });
+
+      // Share another browser tab in a removable overlay. The browser's own picker
+      // decides which tab/window/screen is shared; this page never selects it silently.
+      function removeShareFrame() {
+        if (ctx.shareStream) {
+          ctx.shareStream.getTracks().forEach(function (track) { track.stop(); });
+          ctx.shareStream = null;
+        }
+        if (ctx.shareFrame) {
+          try { ctx.shareFrame.remove(); } catch (e) {}
+          ctx.shareFrame = null;
+        }
+        if (ctx.shareKeyHandler) {
+          d.removeEventListener("keydown", ctx.shareKeyHandler, true);
+          ctx.shareKeyHandler = null;
+        }
+        ctx.setMsg("Screen-share overlay closed. Back to browsing.");
+      }
+
+      async function startShareFrame() {
+        if (!w.navigator.mediaDevices || !w.navigator.mediaDevices.getDisplayMedia) {
+          ctx.setMsg("Tab sharing is unavailable. Use a secure HTTPS page in a supported browser.");
+          return;
+        }
+        try {
+          var stream = await w.navigator.mediaDevices.getDisplayMedia({
+            video: { displaySurface: "browser" },
+            audio: false
+          });
+          // If the user stopped sharing from the browser's own sharing indicator,
+          // clean up the overlay too.
+          ctx.shareStream = stream;
+          var frame = d.createElement("section");
+          frame.setAttribute("aria-label", "Shared browser tab");
+          frame.style.cssText = "position:fixed;inset:7vh 7vw;z-index:2147483646;background:#101318;color:#fff;border:2px solid #5eead4;border-radius:14px;box-shadow:0 18px 70px rgba(0,0,0,.65);overflow:hidden;display:flex;flex-direction:column;";
+          var top = d.createElement("div");
+          top.style.cssText = "height:42px;flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;background:#171d25;font:13px system-ui,sans-serif;";
+          var label = d.createElement("span");
+          label.textContent = "Shared tab · Press J to return to browsing";
+          var close = d.createElement("button");
+          close.type = "button";
+          close.textContent = "Close";
+          close.style.cssText = "border:0;border-radius:8px;padding:6px 12px;background:#5eead4;color:#071411;font-weight:700;cursor:pointer;";
+          top.appendChild(label);
+          top.appendChild(close);
+          var video = d.createElement("video");
+          video.autoplay = true;
+          video.playsInline = true;
+          video.muted = true;
+          video.srcObject = stream;
+          video.style.cssText = "display:block;width:100%;height:calc(100% - 42px);min-height:0;object-fit:contain;background:#050608;";
+          frame.appendChild(top);
+          frame.appendChild(video);
+          d.documentElement.appendChild(frame);
+          ctx.shareFrame = frame;
+
+          close.addEventListener("click", removeShareFrame);
+          ctx.shareKeyHandler = function (e) {
+            if ((e.key === "j" || e.key === "J") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+              e.preventDefault();
+              e.stopPropagation();
+              removeShareFrame();
+            }
+          };
+          d.addEventListener("keydown", ctx.shareKeyHandler, true);
+          stream.getVideoTracks().forEach(function (track) {
+            track.addEventListener("ended", removeShareFrame, { once: true });
+          });
+          try { await video.play(); } catch (e) {}
+          ctx.setMsg("Sharing started. Press J or Close to return to browsing.");
+        } catch (err) {
+          if (err && err.name === "NotAllowedError") ctx.setMsg("Screen sharing was cancelled.");
+          else ctx.setMsg("Could not start screen sharing: " + (err && err.message ? err.message : "unknown error"));
+        }
+      }
+
+      $("#share").addEventListener("click", startShareFrame);
       ctx.retryEls = [$("#stop"), $("#frm")];
       ctx.retryEls.forEach(function (b) { b.hidden = !ctx.retrying; });
       (function () {
